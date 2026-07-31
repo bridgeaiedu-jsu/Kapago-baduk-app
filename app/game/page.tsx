@@ -11,8 +11,9 @@ function GameContent() {
   const validSize = [9, 13, 19].includes(size) ? size : 19;
 
   return (
-    <main className="min-h-screen flex items-center justify-center p-8">
-      <Board size={validSize} />
+    <main className="flex min-h-screen items-center justify-center p-4 sm:p-8">
+      {/* key: 반상 크기가 바뀌면 상태 스택을 새로 초기화 */}
+      <Board key={validSize} size={validSize} />
     </main>
   );
 }
