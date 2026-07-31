@@ -32,10 +32,24 @@
 - 키보드: 방향키 이동 + Enter/Space 착수, `aria-live` 실황 안내
 - 대국 자동 저장 (localStorage) — 새로고침해도 이어서 대국
 
+### AI 대국
+
+- **내장 MCTS AI** — 순수 TypeScript UCT 탐색, 외부 모델·서버 불필요 (9×9·13×13 권장)
+- 난이도 3단계 (하 300 / 중 1,200 / 상 4,000 플레이아웃), AI가 흑·백 선택 가능
+- Web Worker에서 탐색 — 생각 중에도 UI 멈춤 없음 (워커 불가 환경은 메인 스레드 폴백)
+- 상대가 패스하고 이기고 있으면 패스로 종국, AI 대국 무르기는 AI 수까지 2수 취소
+
 ### 기보
 
 - **SGF 저장** — 수순·덤·결과(RE) 포함, 타 바둑 프로그램과 호환
 - **SGF 불러오기** — 외부 기보 파일 로드 (주석·escape·분기 처리, 메인라인 재생), 반상 크기가 다르면 자동 이동
+- **기보 보관함** — IndexedDB에 여러 대국 저장·목록·열기·SGF 다운로드 (`/library`)
+- **수순 되돌려보기** — 슬라이더·버튼으로 국면 탐색, "여기서부터 다시 두기" 분기
+
+### 대국 시계·소리
+
+- 시계 프리셋: 10분 절대 / 5분+초읽기 30초×3 — 초읽기·시간패 지원
+- Web Audio 합성 착수음·따냄음 (오디오 파일 없음), 음소거 토글
 
 ## 실행
 
@@ -61,16 +75,22 @@ pnpm build      # 정적 빌드 (out/)
 ```
 app/
 ├── page.tsx            반상 크기 선택
-└── game/page.tsx       대국 화면
+├── game/page.tsx       대국 화면
+└── library/page.tsx    기보 보관함
 components/
 └── Board.tsx           SVG 반상 + 입력 처리 + 정보 패널
 lib/
 ├── game-logic.ts       규칙 엔진 (순수 함수, UI 비의존)
-├── game-logic.test.ts  엔진 테스트
+├── engine/mcts.ts      MCTS AI (UCT + 경량 시뮬레이터)
+├── engine/ai-worker.ts AI Web Worker (esbuild 사전 번들)
 ├── sgf.ts              SGF 기보 입출력 (FF[4])
-├── sgf.test.ts         SGF 테스트
-└── storage.ts          localStorage 저장/복원
+├── clock.ts            대국 시계 (절대시간·초읽기)
+├── sound.ts            Web Audio 착수음 합성
+├── library.ts          IndexedDB 기보 보관함
+└── storage.ts          localStorage 자동 저장
 ```
+
+테스트 56개: 규칙 엔진 29 · SGF 9 · 시계 9 · 보관함 4 · AI 5
 
 ### 규칙 엔진 설계
 
@@ -82,11 +102,15 @@ lib/
 
 ## 로드맵
 
-- [x] **SGF 기보 입출력** — 저장·공유, 타 프로그램 호환
-- [ ] **AI 대국** — KataGo WASM (브라우저 완결, 서버 불필요)
+- [x] SGF 기보 입출력 — 저장·공유, 타 프로그램 호환
+- [x] 수순 되돌려보기 (기보 탐색 모드)
+- [x] 기보 보관함 (IndexedDB)
+- [x] 대국 시계 (초읽기) + 착수음
+- [x] AI 대국 — 내장 MCTS (입문용)
+- [ ] AI 강화 — KataGo 계열 신경망(TF.js/WebGPU) 백엔드 교체 (`chooseMove` 인터페이스 유지)
 - [ ] 온라인 대국 (실시간 2인)
-- [ ] 수순 되돌려보기 (기보 탐색 모드)
 - [ ] 치석(핸디캡) 대국 — SGF `AB`/`AW` 불러오기 포함
+- [ ] `Board.tsx` 분할 (BoardSvg / GamePanel / useGame 훅)
 
 ## 라이선스
 

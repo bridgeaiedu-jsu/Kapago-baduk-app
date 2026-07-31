@@ -36,6 +36,8 @@ import {
   type ClockPreset,
   type GameClock,
 } from "@/lib/clock";
+import { PASS, chooseMove } from "@/lib/engine/mcts";
+import type { AiResponse } from "@/lib/engine/ai-worker";
 import { loadFromLibrary, saveToLibrary } from "@/lib/library";
 import { exportSGF, importSGF } from "@/lib/sgf";
 import { isMuted, playCapture, playStone, setMuted } from "@/lib/sound";
@@ -62,6 +64,14 @@ const STAR_POINTS: Record<number, [number, number][]> = {
 /** viewBox 좌표계 — 화면 픽셀과 무관한 추상 단위 (반응형은 CSS가 담당) */
 const CELL = 40;
 const PAD = 46;
+
+/** AI 난이도 — MCTS 플레이아웃 수 */
+const AI_LEVELS = {
+  easy: { label: "하", playouts: 300 },
+  normal: { label: "중", playouts: 1200 },
+  hard: { label: "상", playouts: 4000 },
+} as const;
+type AiLevel = keyof typeof AI_LEVELS;
 
 const MOVE_ERROR_TEXT: Record<MoveError, string> = {
   "game-over": "게임이 끝났습니다 — 죽은 돌을 클릭해 사석을 표시하세요",
@@ -120,6 +130,12 @@ export default function Board({
   const [clock, setClock] = useState<GameClock | null>(null);
   const clockLoser = clock?.loser ?? null;
 
+  // AI 대국 — 0수에만 설정. aiColor=null이면 사람 2인.
+  const [aiColor, setAiColor] = useState<StoneColor | null>(null);
+  const [aiLevel, setAiLevel] = useState<AiLevel>("normal");
+  const aiWorkerRef = useRef<Worker | null>(null);
+  const aiRequestIdRef = useRef(0);
+
   const router = useRouter();
   const svgRef = useRef<SVGSVGElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -163,8 +179,8 @@ export default function Board({
 
     const saved = loadGame(size);
     if (saved && saved.moves.length > 0) {
-      // localStorage는 서버 렌더에 없으므로 하이드레이션 후 한 번만 동기화한다
-      // eslint-disable-next-line react-hooks/set-state-in-effect
+      // localStorage(외부 시스템)는 서버 렌더에 없으므로 마운트 후 한 번만 동기화
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- 외부 저장소 1회 복원
       setStack(replayMoves(size, saved.moves));
     }
   }, [loadId, router, size]);
@@ -206,12 +222,86 @@ export default function Board({
   // 시간패 안내 — 인터벌 콜백에서 생긴 상태 변화를 스크린리더에 전달
   useEffect(() => {
     if (clockLoser !== null) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- 인터벌 콜백 파생 상태의 접근성 안내
       setAnnouncement(
         `${colorName(clockLoser)} 시간패 — ${colorName(opponentOf(clockLoser))} 승`
       );
     }
   }, [clockLoser]);
+
+  // ---------------------------------------------------------------------------
+  // AI 대국 — Web Worker에서 MCTS 탐색, 응답은 요청 id로 낡은 것 무시
+  // ---------------------------------------------------------------------------
+
+  /** AI가 지금 두어야 하는 상태 ("AI 생각 중" 표시도 이 값에서 파생) */
+  const aiTurn =
+    aiColor !== null &&
+    current.currentPlayer === aiColor &&
+    !current.isGameOver &&
+    clockLoser === null;
+
+  // 최신 상태·핸들러를 refs로 유지 — 워커 콜백의 낡은 클로저 방지
+  const currentRef = useRef(current);
+  const applyAiMoveRef = useRef<(move: number) => void>(() => {});
+  useEffect(() => {
+    currentRef.current = current;
+  });
+
+  useEffect(() => {
+    let worker: Worker | null = null;
+    try {
+      // esbuild로 사전 번들된 정적 워커 (scripts/build-worker.mjs)
+      const base = process.env.NEXT_PUBLIC_BASE_PATH ?? "";
+      worker = new Worker(`${base}/ai-worker.js`);
+      worker.onmessage = (event: MessageEvent<AiResponse>) => {
+        if (event.data.id === aiRequestIdRef.current) {
+          applyAiMoveRef.current(event.data.move);
+        }
+      };
+      worker.onerror = () => {
+        // 로드 실패(정적 파일 없음 등) — 메인 스레드 폴백으로 전환
+        worker?.terminate();
+        aiWorkerRef.current = null;
+      };
+      aiWorkerRef.current = worker;
+    } catch {
+      aiWorkerRef.current = null; // 워커 불가 환경 — 메인 스레드 폴백 사용
+    }
+    return () => {
+      worker?.terminate();
+      aiWorkerRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!aiTurn || isViewing) return;
+    const requestId = ++aiRequestIdRef.current;
+    const snapshot = currentRef.current;
+    const lastMoveWasPass =
+      snapshot.moveHistory[snapshot.moveHistory.length - 1]?.type === "pass";
+    const playouts = AI_LEVELS[aiLevel].playouts;
+
+    // 짧은 지연: UI 페인트 보장 + 사람 같은 템포
+    const timer = setTimeout(() => {
+      const worker = aiWorkerRef.current;
+      if (worker) {
+        worker.postMessage({
+          id: requestId,
+          size,
+          moves: snapshot.moveHistory,
+          playouts,
+          lastMoveWasPass,
+        });
+      } else {
+        // 폴백: 메인 스레드에서 직접 탐색
+        const result = chooseMove(snapshot, { playouts, lastMoveWasPass });
+        if (requestId === aiRequestIdRef.current) {
+          applyAiMoveRef.current(result.move);
+        }
+      }
+    }, 250);
+    return () => clearTimeout(timer);
+  }, [aiTurn, isViewing, aiLevel, size, current]);
 
   // ---------------------------------------------------------------------------
   // 조작
@@ -274,6 +364,10 @@ export default function Board({
         notify("시간패로 끝난 대국입니다 — 새 게임을 시작하세요", "error");
         return;
       }
+      if (aiTurn) {
+        notify("AI가 생각 중입니다 — 잠시 기다려 주세요", "info");
+        return;
+      }
       if (current.isGameOver) {
         if (current.grid[index] !== EMPTY) {
           const next = toggleDeadGroup(current.grid, size, deadStones, index);
@@ -300,16 +394,23 @@ export default function Board({
         );
       }
     },
-    [clockLoser, current, deadStones, isViewing, notify, pendingIndex, size, tryPlace]
+    [aiTurn, clockLoser, current, deadStones, isViewing, notify, pendingIndex, size, tryPlace]
   );
 
   const handleUndo = useCallback(() => {
-    if (stack.length <= 1 || isViewing || clockLoser !== null) return;
-    setStack((prev) => prev.slice(0, -1)); // 패스·종국 포함 정확히 한 수 취소
+    if (stack.length <= 1 || isViewing || clockLoser !== null || aiTurn) return;
+    // AI 대국: 한 수만 무르면 즉시 AI가 다시 두므로, AI 수까지 함께 무른다
+    const popCount =
+      aiColor !== null &&
+      stack.length > 2 &&
+      stack[stack.length - 2].currentPlayer === aiColor
+        ? 2
+        : 1;
+    setStack((prev) => prev.slice(0, -popCount));
     setDeadStones(new Set());
     setPendingIndex(null);
-    setAnnouncement("한 수 무름");
-  }, [clockLoser, isViewing, stack.length]);
+    setAnnouncement(popCount === 2 ? "두 수 무름 (AI 수 포함)" : "한 수 무름");
+  }, [aiColor, aiTurn, clockLoser, isViewing, stack]);
 
   const handlePass = useCallback(() => {
     if (current.isGameOver || isViewing || clockLoser !== null) return;
@@ -325,6 +426,17 @@ export default function Board({
         : `${colorName(current.currentPlayer)} 패스. ${colorName(next.currentPlayer)} 차례.`
     );
   }, [clockLoser, current, isViewing]);
+
+  // AI 응답 적용 — 탐색이 초과패를 모르므로 거부되면 패스로 폴백
+  useEffect(() => {
+    applyAiMoveRef.current = (move: number) => {
+      if (move === PASS || !placeStone(currentRef.current, move).ok) {
+        handlePass();
+      } else {
+        tryPlace(move);
+      }
+    };
+  });
 
   const handleReset = useCallback(() => {
     // S1: 진행 중 대국은 확인 후에만 폐기 — 실수 탭으로 인한 데이터 손실 방지
@@ -986,6 +1098,74 @@ export default function Board({
           </div>
         </div>
 
+        {/* 상대 (AI) */}
+        <div className="space-y-2 rounded-lg bg-gray-800 p-4">
+          <div className="flex items-center justify-between">
+            <span>상대</span>
+            {current.moveHistory.length === 0 ? (
+              <select
+                value={
+                  aiColor === null
+                    ? "human"
+                    : aiColor === WHITE
+                      ? "ai-white"
+                      : "ai-black"
+                }
+                onChange={(e) => {
+                  const value = e.target.value;
+                  setAiColor(
+                    value === "human"
+                      ? null
+                      : value === "ai-white"
+                        ? WHITE
+                        : BLACK
+                  );
+                }}
+                aria-label="상대 설정"
+                className="rounded bg-gray-700 px-2 py-1 text-sm"
+              >
+                <option value="human">사람 (2인)</option>
+                <option value="ai-white">AI — 백 (내가 흑)</option>
+                <option value="ai-black">AI — 흑 (내가 백)</option>
+              </select>
+            ) : (
+              <span className="text-sm text-gray-400">
+                {aiColor === null
+                  ? "사람 (2인)"
+                  : `AI — ${colorName(aiColor)} (${AI_LEVELS[aiLevel].label})`}
+              </span>
+            )}
+          </div>
+          {aiColor !== null && current.moveHistory.length === 0 && (
+            <div className="flex items-center justify-between">
+              <span>난이도</span>
+              <select
+                value={aiLevel}
+                onChange={(e) => setAiLevel(e.target.value as AiLevel)}
+                aria-label="AI 난이도"
+                className="rounded bg-gray-700 px-2 py-1 text-sm"
+              >
+                {(Object.keys(AI_LEVELS) as AiLevel[]).map((level) => (
+                  <option key={level} value={level}>
+                    {AI_LEVELS[level].label}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+          {aiColor !== null && size === 19 && (
+            <p className="text-xs text-amber-300">
+              19줄에서는 AI가 느리고 약합니다 — 9×9·13×13 권장
+            </p>
+          )}
+          {aiTurn && !isViewing && (
+            <div className="flex items-center gap-2 text-sm text-amber-400">
+              <span className="inline-block h-3 w-3 animate-pulse rounded-full bg-amber-400" />
+              AI 생각 중…
+            </div>
+          )}
+        </div>
+
         {/* 대국 시계 */}
         <div className="space-y-2 rounded-lg bg-gray-800 p-4">
           <div className="flex items-center justify-between">
@@ -1070,7 +1250,7 @@ export default function Board({
           <button
             type="button"
             onClick={handlePass}
-            disabled={current.isGameOver || isViewing}
+            disabled={current.isGameOver || isViewing || aiTurn}
             className="rounded-lg bg-gray-700 px-4 py-2 transition-colors hover:bg-gray-600 disabled:opacity-40"
           >
             패스
@@ -1078,7 +1258,7 @@ export default function Board({
           <button
             type="button"
             onClick={handleUndo}
-            disabled={stack.length <= 1 || isViewing}
+            disabled={stack.length <= 1 || isViewing || aiTurn}
             className="rounded-lg bg-gray-700 px-4 py-2 transition-colors hover:bg-gray-600 disabled:opacity-40"
           >
             무르기

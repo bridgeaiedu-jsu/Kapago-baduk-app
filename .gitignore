@@ -6,3 +6,4 @@ coverage/
 .env.local
 *.tsbuildinfo
 next-env.d.ts
+public/ai-worker.js
