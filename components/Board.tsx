@@ -26,6 +26,7 @@ import {
   type MoveError,
   type StoneColor,
 } from "@/lib/game-logic";
+import { loadFromLibrary, saveToLibrary } from "@/lib/library";
 import { exportSGF, importSGF } from "@/lib/sgf";
 import { clearGame, loadGame, saveGame } from "@/lib/storage";
 
@@ -67,7 +68,14 @@ function colorName(color: StoneColor): string {
 // 컴포넌트
 // -----------------------------------------------------------------------------
 
-export default function Board({ size }: { size: number }) {
+export default function Board({
+  size,
+  loadId = null,
+}: {
+  size: number;
+  /** 보관함에서 열 기보 id (URL ?load=) */
+  loadId?: string | null;
+}) {
   // 상태 스택 — 무르기 O(1). stack[stack.length - 1]이 현재 국면.
   const [stack, setStack] = useState<GameState[]>(() => [
     createInitialGameState(size),
@@ -102,14 +110,42 @@ export default function Board({ size }: { size: number }) {
   // 저장/복원 (A3) — 서버 렌더와의 불일치를 피하려고 마운트 후 복원
   // ---------------------------------------------------------------------------
 
+  const restoredRef = useRef(false);
   useEffect(() => {
+    // 최초 마운트에 한 번만: 보관함 기보(?load=) 우선, 없으면 자동 저장 복원
+    if (restoredRef.current) return;
+    restoredRef.current = true;
+
+    if (loadId) {
+      let cancelled = false;
+      loadFromLibrary(loadId).then((game) => {
+        if (cancelled) return;
+        if (!game || game.size !== size) {
+          setMessage({
+            text: "보관함에서 기보를 찾지 못했습니다",
+            key: Date.now(),
+            tone: "error",
+          });
+          return;
+        }
+        setStack(replayMoves(size, game.moves));
+        setViewIndex(null);
+        setAnnouncement(`보관함 기보 "${game.title}" 불러옴`);
+        // URL의 load 파라미터 제거 — 새로고침 시 재로드로 진행 대국을 덮지 않도록
+        router.replace(`/game?size=${size}`);
+      });
+      return () => {
+        cancelled = true;
+      };
+    }
+
     const saved = loadGame(size);
     if (saved && saved.moves.length > 0) {
       // localStorage는 서버 렌더에 없으므로 하이드레이션 후 한 번만 동기화한다
       // eslint-disable-next-line react-hooks/set-state-in-effect
       setStack(replayMoves(size, saved.moves));
     }
-  }, [size]);
+  }, [loadId, router, size]);
 
   useEffect(() => {
     if (current.moveHistory.length > 0) {
@@ -338,6 +374,34 @@ export default function Board({ size }: { size: number }) {
     },
     [SGF_IMPORT_ERROR, current.moveHistory.length, notify, router, size]
   );
+
+  const handleSaveToLibrary = useCallback(async () => {
+    if (current.moveHistory.length === 0) return;
+    const defaultTitle = `${size}×${size} 대국 ${new Date().toLocaleDateString("ko-KR")}`;
+    const title = window.prompt("기보 제목", defaultTitle);
+    if (title === null) return;
+
+    let result: string | null = null;
+    if (current.isGameOver) {
+      const finalScore = calculateScore(current, deadStones);
+      result =
+        finalScore.winner === "draw"
+          ? "무승부"
+          : `${finalScore.winner === "black" ? "흑" : "백"} ${Math.abs(finalScore.black - finalScore.white)}집 승`;
+    }
+
+    try {
+      await saveToLibrary({
+        title: title.trim() || defaultTitle,
+        size,
+        moves: current.moveHistory,
+        result,
+      });
+      notify("보관함에 저장했습니다", "info");
+    } catch {
+      notify("보관함 저장에 실패했습니다", "error");
+    }
+  }, [current, deadStones, notify, size]);
 
   // ---------------------------------------------------------------------------
   // 포인터 — SVG 루트 1곳에서 위임 처리 (교차점별 핸들러 361개 제거)
@@ -911,6 +975,20 @@ export default function Board({ size }: { size: number }) {
           >
             기보 불러오기
           </button>
+          <button
+            type="button"
+            onClick={handleSaveToLibrary}
+            disabled={current.moveHistory.length === 0}
+            className="rounded-lg bg-gray-700 px-4 py-2 transition-colors hover:bg-gray-600 disabled:opacity-40"
+          >
+            보관함에 저장
+          </button>
+          <Link
+            href="/library"
+            className="rounded-lg bg-gray-700 px-4 py-2 text-center transition-colors hover:bg-gray-600"
+          >
+            기보 보관함
+          </Link>
           <input
             ref={fileInputRef}
             type="file"

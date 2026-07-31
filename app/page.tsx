@@ -25,6 +25,12 @@ export default function Home() {
         >
           19 x 19
         </Link>
+        <Link
+          href="/library"
+          className="px-8 py-3 bg-gray-800 hover:bg-gray-700 rounded-lg text-center text-base text-gray-300 transition-colors"
+        >
+          기보 보관함
+        </Link>
       </div>
     </main>
   );
