@@ -74,6 +74,12 @@ export default function Board({ size }: { size: number }) {
   ]);
   const current = stack[stack.length - 1];
 
+  // 수순 탐색: null = 최신(대국 진행), 숫자 = stack의 해당 국면을 열람 중
+  const [viewIndex, setViewIndex] = useState<number | null>(null);
+  const isViewing = viewIndex !== null && viewIndex < stack.length - 1;
+  /** 반상·패널에 실제로 표시되는 국면 */
+  const displayed = isViewing ? stack[viewIndex] : current;
+
   const [hoverIndex, setHoverIndex] = useState<number | null>(null); // 마우스
   const [pendingIndex, setPendingIndex] = useState<number | null>(null); // 터치 미리보기
   const [cursorIndex, setCursorIndex] = useState<number | null>(null); // 키보드
@@ -141,6 +147,7 @@ export default function Board({ size }: { size: number }) {
       }
       setStack((prev) => [...prev, result.state]);
       setPendingIndex(null);
+      setViewIndex(null);
       setAnnouncement(
         `${colorName(current.currentPlayer)} ${pointName(index, size)} 착수. ` +
           `${colorName(result.state.currentPlayer)} 차례.`
@@ -152,6 +159,13 @@ export default function Board({ size }: { size: number }) {
   /** 종국 후: 사석 토글. 대국 중: 착수(마우스는 즉시, 터치는 2탭 확정). */
   const handleTap = useCallback(
     (index: number, pointerType: string) => {
+      if (isViewing) {
+        notify(
+          "수순 탐색 중입니다 — 최신 수로 이동하거나 '여기서부터 다시 두기'를 누르세요",
+          "info"
+        );
+        return;
+      }
       if (current.isGameOver) {
         if (current.grid[index] !== EMPTY) {
           const next = toggleDeadGroup(current.grid, size, deadStones, index);
@@ -178,19 +192,19 @@ export default function Board({ size }: { size: number }) {
         );
       }
     },
-    [current, deadStones, pendingIndex, size, tryPlace]
+    [current, deadStones, isViewing, notify, pendingIndex, size, tryPlace]
   );
 
   const handleUndo = useCallback(() => {
-    if (stack.length <= 1) return;
+    if (stack.length <= 1 || isViewing) return;
     setStack((prev) => prev.slice(0, -1)); // 패스·종국 포함 정확히 한 수 취소
     setDeadStones(new Set());
     setPendingIndex(null);
     setAnnouncement("한 수 무름");
-  }, [stack.length]);
+  }, [isViewing, stack.length]);
 
   const handlePass = useCallback(() => {
-    if (current.isGameOver) return;
+    if (current.isGameOver || isViewing) return;
     const next = pass(current);
     setStack((prev) => [...prev, next]);
     setPendingIndex(null);
@@ -199,7 +213,7 @@ export default function Board({ size }: { size: number }) {
         ? "두 번 연속 패스 — 종국. 죽은 돌을 클릭해 사석을 표시하세요."
         : `${colorName(current.currentPlayer)} 패스. ${colorName(next.currentPlayer)} 차례.`
     );
-  }, [current]);
+  }, [current, isViewing]);
 
   const handleReset = useCallback(() => {
     // S1: 진행 중 대국은 확인 후에만 폐기 — 실수 탭으로 인한 데이터 손실 방지
@@ -214,10 +228,35 @@ export default function Board({ size }: { size: number }) {
     setStack([createInitialGameState(size)]);
     setDeadStones(new Set());
     setPendingIndex(null);
+    setViewIndex(null);
     setMessage(null);
     clearGame(size);
     setAnnouncement("새 게임 시작. 흑 차례.");
   }, [current.moveHistory.length, size]);
+
+  /** 탐색 중인 국면에서 이후 수순을 버리고 대국 재개 */
+  const handleBranchHere = useCallback(() => {
+    if (!isViewing || viewIndex === null) return;
+    const discarded = stack.length - 1 - viewIndex;
+    if (
+      !window.confirm(
+        `이 수 이후의 ${discarded}수를 지우고 여기서부터 다시 둘까요?`
+      )
+    ) {
+      return;
+    }
+    const truncated = stack.slice(0, viewIndex + 1);
+    setStack(truncated);
+    setViewIndex(null);
+    setDeadStones(new Set());
+    setPendingIndex(null);
+    if (truncated[truncated.length - 1].moveHistory.length === 0) {
+      clearGame(size); // 첫 수 이전으로 돌아갔으면 자동 저장도 비운다
+    }
+    setAnnouncement(
+      `${truncated[truncated.length - 1].moveHistory.length}수 시점부터 대국 재개`
+    );
+  }, [isViewing, size, stack, viewIndex]);
 
   // ---------------------------------------------------------------------------
   // SGF 기보 저장/불러오기
@@ -287,6 +326,7 @@ export default function Board({ size }: { size: number }) {
       setStack(newStack);
       setDeadStones(new Set());
       setPendingIndex(null);
+      setViewIndex(null);
       if (replayed < parsed.moves.length) {
         notify(
           `기보에 규칙 위반 수가 있어 ${replayed}수까지만 불러왔습니다`,
@@ -398,20 +438,24 @@ export default function Board({ size }: { size: number }) {
   // ---------------------------------------------------------------------------
 
   const lastMoveIndex = useMemo(() => {
-    for (let i = current.moveHistory.length - 1; i >= 0; i--) {
-      const move = current.moveHistory[i];
+    for (let i = displayed.moveHistory.length - 1; i >= 0; i--) {
+      const move = displayed.moveHistory[i];
       if (move.type === "move") return move.index;
     }
     return null;
-  }, [current.moveHistory]);
+  }, [displayed.moveHistory]);
 
   const score = useMemo(
-    () => (current.isGameOver ? calculateScore(current, deadStones) : null),
-    [current, deadStones]
+    () =>
+      current.isGameOver && !isViewing
+        ? calculateScore(current, deadStones)
+        : null,
+    [current, deadStones, isViewing]
   );
 
   const previewIndex =
     !current.isGameOver &&
+    !isViewing &&
     hoverIndex !== null &&
     current.grid[hoverIndex] === EMPTY
       ? hoverIndex
@@ -442,7 +486,11 @@ export default function Board({ size }: { size: number }) {
           style={{ backgroundColor: "var(--board-color)" }}
           role="application"
           aria-label={`${size}×${size} 바둑판. 방향키로 이동, 엔터로 착수. 현재 ${
-            current.isGameOver ? "종국 — 사석 표시 중" : `${colorName(current.currentPlayer)} 차례`
+            isViewing
+              ? `수순 탐색 중 (${displayed.moveHistory.length}수 시점)`
+              : current.isGameOver
+                ? "종국 — 사석 표시 중"
+                : `${colorName(current.currentPlayer)} 차례`
           }.`}
           tabIndex={0}
           onPointerDown={handlePointerDown}
@@ -544,12 +592,12 @@ export default function Board({ size }: { size: number }) {
             })}
 
           {/* 돌 */}
-          {Array.from(current.grid).map((cell, index) => {
+          {Array.from(displayed.grid).map((cell, index) => {
             if (cell === EMPTY) return null;
             const { row, col } = indexToCoord(index, size);
             const cx = PAD + col * CELL;
             const cy = PAD + row * CELL;
-            const isDead = deadStones.has(index);
+            const isDead = !isViewing && deadStones.has(index);
             return (
               <g key={`stone-${index}`} opacity={isDead ? 0.45 : 1}>
                 <circle
@@ -572,7 +620,7 @@ export default function Board({ size }: { size: number }) {
 
           {/* 마지막 착수 표시 (A1) */}
           {lastMoveIndex !== null &&
-            current.grid[lastMoveIndex] !== EMPTY &&
+            displayed.grid[lastMoveIndex] !== EMPTY &&
             (() => {
               const { row, col } = indexToCoord(lastMoveIndex, size);
               return (
@@ -582,7 +630,7 @@ export default function Board({ size }: { size: number }) {
                   r={CELL * 0.2}
                   fill="none"
                   stroke={
-                    current.grid[lastMoveIndex] === BLACK ? "#fff" : "#000"
+                    displayed.grid[lastMoveIndex] === BLACK ? "#fff" : "#000"
                   }
                   strokeWidth={2.5}
                 />
@@ -618,6 +666,7 @@ export default function Board({ size }: { size: number }) {
           {/* 터치 Tap-Preview-Confirm 대기 돌 */}
           {pendingIndex !== null &&
             !current.isGameOver &&
+            !isViewing &&
             (() => {
               const { row, col } = indexToCoord(pendingIndex, size);
               const cx = PAD + col * CELL;
@@ -663,6 +712,81 @@ export default function Board({ size }: { size: number }) {
             })()}
         </svg>
 
+        {/* 수순 탐색 내비게이션 */}
+        {stack.length > 1 && (
+          <div className="mt-3 flex items-center gap-2 text-white">
+            <button
+              type="button"
+              onClick={() => setViewIndex(0)}
+              disabled={displayed.moveHistory.length === 0}
+              aria-label="처음으로"
+              className="rounded bg-gray-700 px-2 py-1 text-sm hover:bg-gray-600 disabled:opacity-40"
+            >
+              ⏮
+            </button>
+            <button
+              type="button"
+              onClick={() =>
+                setViewIndex(
+                  Math.max(0, (viewIndex ?? stack.length - 1) - 1)
+                )
+              }
+              disabled={displayed.moveHistory.length === 0}
+              aria-label="한 수 이전"
+              className="rounded bg-gray-700 px-2 py-1 text-sm hover:bg-gray-600 disabled:opacity-40"
+            >
+              ◀
+            </button>
+            <input
+              type="range"
+              min={0}
+              max={stack.length - 1}
+              value={viewIndex ?? stack.length - 1}
+              onChange={(e) => {
+                const value = Number(e.target.value);
+                setViewIndex(value >= stack.length - 1 ? null : value);
+              }}
+              aria-label="수순 탐색"
+              className="min-w-0 flex-1 accent-amber-500"
+            />
+            <button
+              type="button"
+              onClick={() => {
+                const next = (viewIndex ?? stack.length - 1) + 1;
+                setViewIndex(next >= stack.length - 1 ? null : next);
+              }}
+              disabled={!isViewing}
+              aria-label="한 수 다음"
+              className="rounded bg-gray-700 px-2 py-1 text-sm hover:bg-gray-600 disabled:opacity-40"
+            >
+              ▶
+            </button>
+            <button
+              type="button"
+              onClick={() => setViewIndex(null)}
+              disabled={!isViewing}
+              aria-label="최신 수로"
+              className="rounded bg-gray-700 px-2 py-1 text-sm hover:bg-gray-600 disabled:opacity-40"
+            >
+              ⏭
+            </button>
+            <span className="w-20 text-right text-sm tabular-nums text-gray-300">
+              {displayed.moveHistory.length} / {current.moveHistory.length}수
+            </span>
+          </div>
+        )}
+        {isViewing && (
+          <div className="mt-2 text-center">
+            <button
+              type="button"
+              onClick={handleBranchHere}
+              className="rounded-lg bg-amber-700 px-4 py-1.5 text-sm text-white transition-colors hover:bg-amber-600"
+            >
+              여기서부터 다시 두기
+            </button>
+          </div>
+        )}
+
         {/* 착수 불가·안내 피드백 (A2) */}
         <div className="mt-3 h-6 text-center">
           {message && (
@@ -692,30 +816,32 @@ export default function Board({ size }: { size: number }) {
             className="h-6 w-6 rounded-full"
             style={{
               background:
-                current.currentPlayer === BLACK
+                displayed.currentPlayer === BLACK
                   ? "radial-gradient(circle at 35% 35%, #555, #000)"
                   : "radial-gradient(circle at 35% 35%, #fff, #ccc)",
             }}
           />
           <span className="text-lg">
-            {current.isGameOver
-              ? "종국 — 사석 표시"
-              : `${colorName(current.currentPlayer)} 차례`}
+            {isViewing
+              ? `탐색 중 — ${displayed.moveHistory.length}수 시점`
+              : current.isGameOver
+                ? "종국 — 사석 표시"
+                : `${colorName(current.currentPlayer)} 차례`}
           </span>
         </div>
 
         <div className="space-y-2 rounded-lg bg-gray-800 p-4">
           <div className="flex justify-between">
             <span>흑이 잡은 돌</span>
-            <span className="font-bold">{current.captures.black}</span>
+            <span className="font-bold">{displayed.captures.black}</span>
           </div>
           <div className="flex justify-between">
             <span>백이 잡은 돌</span>
-            <span className="font-bold">{current.captures.white}</span>
+            <span className="font-bold">{displayed.captures.white}</span>
           </div>
           <div className="flex justify-between">
             <span>수</span>
-            <span className="font-bold">{current.moveHistory.length}</span>
+            <span className="font-bold">{displayed.moveHistory.length}</span>
           </div>
         </div>
 
@@ -747,7 +873,7 @@ export default function Board({ size }: { size: number }) {
           <button
             type="button"
             onClick={handlePass}
-            disabled={current.isGameOver}
+            disabled={current.isGameOver || isViewing}
             className="rounded-lg bg-gray-700 px-4 py-2 transition-colors hover:bg-gray-600 disabled:opacity-40"
           >
             패스
@@ -755,7 +881,7 @@ export default function Board({ size }: { size: number }) {
           <button
             type="button"
             onClick={handleUndo}
-            disabled={stack.length <= 1}
+            disabled={stack.length <= 1 || isViewing}
             className="rounded-lg bg-gray-700 px-4 py-2 transition-colors hover:bg-gray-600 disabled:opacity-40"
           >
             무르기
