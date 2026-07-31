@@ -1,0 +1,32 @@
+"use client";
+
+import { useSearchParams } from "next/navigation";
+import { Suspense } from "react";
+import Board from "@/components/Board";
+
+function GameContent() {
+  const searchParams = useSearchParams();
+  const sizeParam = searchParams.get("size");
+  const size = sizeParam ? parseInt(sizeParam) : 19;
+  const validSize = [9, 13, 19].includes(size) ? size : 19;
+
+  return (
+    <main className="min-h-screen flex items-center justify-center p-8">
+      <Board size={validSize} />
+    </main>
+  );
+}
+
+export default function GamePage() {
+  return (
+    <Suspense
+      fallback={
+        <main className="min-h-screen flex items-center justify-center text-white">
+          로딩 중...
+        </main>
+      }
+    >
+      <GameContent />
+    </Suspense>
+  );
+}
