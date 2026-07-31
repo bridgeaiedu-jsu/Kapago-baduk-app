@@ -5,7 +5,10 @@
 
 import type { Move } from "./game-logic";
 
-const STORAGE_KEY = "baduk-game-v1";
+/** 반상 크기별 독립 슬롯 — 9로를 열어도 19로 대국이 지워지지 않는다 */
+function storageKey(size: number): string {
+  return `baduk-game-v1:${size}`;
+}
 
 export interface SavedGame {
   readonly size: number;
@@ -14,19 +17,20 @@ export interface SavedGame {
 
 export function saveGame(game: SavedGame): void {
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(game));
+    localStorage.setItem(storageKey(game.size), JSON.stringify(game));
   } catch {
     // 저장 불가(프라이빗 모드 등)여도 대국 진행에는 지장 없음
   }
 }
 
-export function loadGame(): SavedGame | null {
+export function loadGame(size: number): SavedGame | null {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
+    const raw = localStorage.getItem(storageKey(size));
     if (!raw) return null;
     const parsed = JSON.parse(raw) as SavedGame;
     if (
       typeof parsed?.size !== "number" ||
+      parsed.size !== size ||
       !Array.isArray(parsed?.moves)
     ) {
       return null;
@@ -37,9 +41,9 @@ export function loadGame(): SavedGame | null {
   }
 }
 
-export function clearGame(): void {
+export function clearGame(size: number): void {
   try {
-    localStorage.removeItem(STORAGE_KEY);
+    localStorage.removeItem(storageKey(size));
   } catch {
     // 무시
   }

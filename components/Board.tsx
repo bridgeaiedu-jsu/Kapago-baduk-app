@@ -97,8 +97,8 @@ export default function Board({ size }: { size: number }) {
   // ---------------------------------------------------------------------------
 
   useEffect(() => {
-    const saved = loadGame();
-    if (saved && saved.size === size && saved.moves.length > 0) {
+    const saved = loadGame(size);
+    if (saved && saved.moves.length > 0) {
       // localStorage는 서버 렌더에 없으므로 하이드레이션 후 한 번만 동기화한다
       // eslint-disable-next-line react-hooks/set-state-in-effect
       setStack(replayMoves(size, saved.moves));
@@ -202,13 +202,22 @@ export default function Board({ size }: { size: number }) {
   }, [current]);
 
   const handleReset = useCallback(() => {
+    // S1: 진행 중 대국은 확인 후에만 폐기 — 실수 탭으로 인한 데이터 손실 방지
+    if (
+      current.moveHistory.length > 0 &&
+      !window.confirm(
+        `진행 중인 대국(${current.moveHistory.length}수)을 지우고 새 게임을 시작할까요?`
+      )
+    ) {
+      return;
+    }
     setStack([createInitialGameState(size)]);
     setDeadStones(new Set());
     setPendingIndex(null);
     setMessage(null);
-    clearGame();
+    clearGame(size);
     setAnnouncement("새 게임 시작. 흑 차례.");
-  }, [size]);
+  }, [current.moveHistory.length, size]);
 
   // ---------------------------------------------------------------------------
   // SGF 기보 저장/불러오기
@@ -253,15 +262,28 @@ export default function Board({ size }: { size: number }) {
         return;
       }
 
+      // S2: 진행 중 대국을 덮어쓰기 전에 확인
+      if (
+        current.moveHistory.length > 0 &&
+        !window.confirm(
+          `진행 중인 대국(${current.moveHistory.length}수)을 불러온 기보로 교체할까요?`
+        )
+      ) {
+        return;
+      }
+
+      // S4: 크기와 무관하게 먼저 재생·검증 — 규칙 위반 수는 잘라내고 안내
+      const newStack = replayMoves(parsed.size, parsed.moves);
+      const replayed = newStack.length - 1;
+      const validMoves = newStack[newStack.length - 1].moveHistory;
+
       if (parsed.size !== size) {
-        // 다른 반상 크기 — 저장 후 해당 크기 페이지로 이동해 복원
-        saveGame({ size: parsed.size, moves: parsed.moves });
+        // 다른 반상 크기 — 검증된 수순만 저장 후 해당 크기 페이지로 이동해 복원
+        saveGame({ size: parsed.size, moves: validMoves });
         router.push(`/game?size=${parsed.size}`);
         return;
       }
 
-      const newStack = replayMoves(size, parsed.moves);
-      const replayed = newStack.length - 1;
       setStack(newStack);
       setDeadStones(new Set());
       setPendingIndex(null);
@@ -274,7 +296,7 @@ export default function Board({ size }: { size: number }) {
         notify(`기보 ${replayed}수를 불러왔습니다`, "info");
       }
     },
-    [SGF_IMPORT_ERROR, notify, router, size]
+    [SGF_IMPORT_ERROR, current.moveHistory.length, notify, router, size]
   );
 
   // ---------------------------------------------------------------------------
@@ -394,6 +416,12 @@ export default function Board({ size }: { size: number }) {
     current.grid[hoverIndex] === EMPTY
       ? hoverIndex
       : null;
+
+  // S5: 미리보기 자리의 합법성 — 불법(패·자살수·초과패)이면 클릭 전에 표시
+  const previewLegal = useMemo(
+    () => (previewIndex !== null ? placeStone(current, previewIndex).ok : true),
+    [current, previewIndex]
+  );
 
   // ---------------------------------------------------------------------------
   // 렌더
@@ -561,15 +589,25 @@ export default function Board({ size }: { size: number }) {
               );
             })()}
 
-          {/* 마우스 미리보기 */}
+          {/* 마우스 미리보기 — 불법 자리는 빨간 X로 경고 */}
           {previewIndex !== null &&
             previewIndex !== pendingIndex &&
             (() => {
               const { row, col } = indexToCoord(previewIndex, size);
+              const cx = PAD + col * CELL;
+              const cy = PAD + row * CELL;
+              if (!previewLegal) {
+                return (
+                  <g stroke="#dc2626" strokeWidth={4} strokeLinecap="round" opacity={0.8}>
+                    <line x1={cx - 10} y1={cy - 10} x2={cx + 10} y2={cy + 10} />
+                    <line x1={cx - 10} y1={cy + 10} x2={cx + 10} y2={cy - 10} />
+                  </g>
+                );
+              }
               return (
                 <circle
-                  cx={PAD + col * CELL}
-                  cy={PAD + row * CELL}
+                  cx={cx}
+                  cy={cy}
                   r={CELL * 0.46}
                   fill={current.currentPlayer === BLACK ? "#000" : "#fff"}
                   opacity={0.4}

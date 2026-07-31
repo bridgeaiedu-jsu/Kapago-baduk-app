@@ -1,8 +1,10 @@
 # Kapago — 바둑 웹앱
 
-브라우저에서 바로 두는 2인(핫시트) 바둑. 설치 없이 링크만으로 대국할 수 있는 것을 목표로 한다.
+브라우저에서 바로 두는 2인(핫시트) 바둑. 설치 없이 링크만으로 대국한다.
 
-**스택**: Next.js 16 · React 19 · TypeScript (strict) · Tailwind CSS 4 · Vitest
+**▶ 바로 두기: https://bridgeaiedu-jsu.github.io/Kapago-baduk-app/**
+
+**스택**: Next.js 16 (static export) · React 19 · TypeScript (strict) · Tailwind CSS 4 · Vitest · GitHub Actions → GitHub Pages
 
 ## 기능
 
@@ -43,10 +45,16 @@ pnpm dev        # http://localhost:3000
 ```
 
 ```bash
-pnpm test       # 규칙 엔진 테스트 (29개)
+pnpm test       # 규칙 엔진·SGF 테스트 (38개)
 pnpm lint       # ESLint
-pnpm build      # 프로덕션 빌드
+pnpm build      # 정적 빌드 (out/)
 ```
+
+## 배포
+
+`main` 푸시마다 GitHub Actions가 lint → test → build 후 GitHub Pages로 자동 배포한다
+(`.github/workflows/ci.yml`). Pages는 저장소 하위 경로에 서빙되므로 CI에서
+`NEXT_PUBLIC_BASE_PATH=/Kapago-baduk-app`를 주입한다.
 
 ## 구조
 
