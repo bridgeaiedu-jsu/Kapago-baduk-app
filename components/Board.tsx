@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import {
   useCallback,
   useEffect,
@@ -25,6 +26,7 @@ import {
   type MoveError,
   type StoneColor,
 } from "@/lib/game-logic";
+import { exportSGF, importSGF } from "@/lib/sgf";
 import { clearGame, loadGame, saveGame } from "@/lib/storage";
 
 // -----------------------------------------------------------------------------
@@ -76,12 +78,16 @@ export default function Board({ size }: { size: number }) {
   const [pendingIndex, setPendingIndex] = useState<number | null>(null); // 터치 미리보기
   const [cursorIndex, setCursorIndex] = useState<number | null>(null); // 키보드
   const [deadStones, setDeadStones] = useState<ReadonlySet<number>>(new Set());
-  const [message, setMessage] = useState<{ text: string; key: number } | null>(
-    null
-  );
+  const [message, setMessage] = useState<{
+    text: string;
+    key: number;
+    tone: "error" | "info";
+  } | null>(null);
   const [announcement, setAnnouncement] = useState("");
 
+  const router = useRouter();
   const svgRef = useRef<SVGSVGElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const pointerDownRef = useRef<{ x: number; y: number } | null>(null);
 
   const boardSpan = (size - 1) * CELL + PAD * 2;
@@ -116,11 +122,15 @@ export default function Board({ size }: { size: number }) {
   // 조작
   // ---------------------------------------------------------------------------
 
-  const showError = useCallback((reason: MoveError) => {
-    const text = MOVE_ERROR_TEXT[reason];
-    setMessage({ text, key: Date.now() });
+  const notify = useCallback((text: string, tone: "error" | "info") => {
+    setMessage({ text, key: Date.now(), tone });
     setAnnouncement(text);
   }, []);
+
+  const showError = useCallback(
+    (reason: MoveError) => notify(MOVE_ERROR_TEXT[reason], "error"),
+    [notify]
+  );
 
   const tryPlace = useCallback(
     (index: number) => {
@@ -199,6 +209,73 @@ export default function Board({ size }: { size: number }) {
     clearGame();
     setAnnouncement("새 게임 시작. 흑 차례.");
   }, [size]);
+
+  // ---------------------------------------------------------------------------
+  // SGF 기보 저장/불러오기
+  // ---------------------------------------------------------------------------
+
+  const handleExportSgf = useCallback(() => {
+    const score = current.isGameOver
+      ? calculateScore(current, deadStones)
+      : null;
+    const sgf = exportSGF(size, current.moveHistory, { score });
+    const stamp = new Date()
+      .toISOString()
+      .slice(0, 16)
+      .replace(/[-:]/g, "")
+      .replace("T", "-");
+    const blob = new Blob([sgf], { type: "application/x-go-sgf" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = `kapago-${size}x${size}-${stamp}.sgf`;
+    anchor.click();
+    URL.revokeObjectURL(url);
+    notify("기보를 SGF 파일로 저장했습니다", "info");
+  }, [current, deadStones, notify, size]);
+
+  const SGF_IMPORT_ERROR: Record<string, string> = useMemo(
+    () => ({
+      invalid: "SGF 형식을 해석할 수 없습니다",
+      "not-go": "바둑(GM[1]) 기보가 아닙니다",
+      "bad-size": "지원하지 않는 반상 크기입니다 (9·13·19만 지원)",
+      handicap: "치석(핸디캡) 기보는 아직 지원하지 않습니다",
+    }),
+    []
+  );
+
+  const handleImportFile = useCallback(
+    async (file: File) => {
+      const text = await file.text();
+      const parsed = importSGF(text);
+      if (!parsed.ok) {
+        notify(SGF_IMPORT_ERROR[parsed.reason], "error");
+        return;
+      }
+
+      if (parsed.size !== size) {
+        // 다른 반상 크기 — 저장 후 해당 크기 페이지로 이동해 복원
+        saveGame({ size: parsed.size, moves: parsed.moves });
+        router.push(`/game?size=${parsed.size}`);
+        return;
+      }
+
+      const newStack = replayMoves(size, parsed.moves);
+      const replayed = newStack.length - 1;
+      setStack(newStack);
+      setDeadStones(new Set());
+      setPendingIndex(null);
+      if (replayed < parsed.moves.length) {
+        notify(
+          `기보에 규칙 위반 수가 있어 ${replayed}수까지만 불러왔습니다`,
+          "error"
+        );
+      } else {
+        notify(`기보 ${replayed}수를 불러왔습니다`, "info");
+      }
+    },
+    [SGF_IMPORT_ERROR, notify, router, size]
+  );
 
   // ---------------------------------------------------------------------------
   // 포인터 — SVG 루트 1곳에서 위임 처리 (교차점별 핸들러 361개 제거)
@@ -548,12 +625,16 @@ export default function Board({ size }: { size: number }) {
             })()}
         </svg>
 
-        {/* 착수 불가 피드백 (A2) */}
+        {/* 착수 불가·안내 피드백 (A2) */}
         <div className="mt-3 h-6 text-center">
           {message && (
             <span
               key={message.key}
-              className="rounded bg-red-900/80 px-3 py-1 text-sm text-red-100"
+              className={`rounded px-3 py-1 text-sm ${
+                message.tone === "error"
+                  ? "bg-red-900/80 text-red-100"
+                  : "bg-emerald-900/80 text-emerald-100"
+              }`}
             >
               {message.text}
             </span>
@@ -648,6 +729,35 @@ export default function Board({ size }: { size: number }) {
           >
             새 게임
           </button>
+        </div>
+
+        <div className="flex flex-col gap-2 border-t border-gray-700 pt-4">
+          <button
+            type="button"
+            onClick={handleExportSgf}
+            disabled={current.moveHistory.length === 0}
+            className="rounded-lg bg-gray-700 px-4 py-2 transition-colors hover:bg-gray-600 disabled:opacity-40"
+          >
+            기보 저장 (SGF)
+          </button>
+          <button
+            type="button"
+            onClick={() => fileInputRef.current?.click()}
+            className="rounded-lg bg-gray-700 px-4 py-2 transition-colors hover:bg-gray-600"
+          >
+            기보 불러오기
+          </button>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".sgf,application/x-go-sgf"
+            className="hidden"
+            onChange={(e) => {
+              const file = e.target.files?.[0];
+              if (file) handleImportFile(file);
+              e.target.value = ""; // 같은 파일 재선택 허용
+            }}
+          />
         </div>
 
         <Link
