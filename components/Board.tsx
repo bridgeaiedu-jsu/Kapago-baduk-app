@@ -17,6 +17,7 @@ import {
   calculateScore,
   createInitialGameState,
   indexToCoord,
+  opponentOf,
   pass,
   placeStone,
   pointName,
@@ -26,8 +27,18 @@ import {
   type MoveError,
   type StoneColor,
 } from "@/lib/game-logic";
+import {
+  CLOCK_PRESETS,
+  createClock,
+  formatMs,
+  onMoveComplete,
+  tickClock,
+  type ClockPreset,
+  type GameClock,
+} from "@/lib/clock";
 import { loadFromLibrary, saveToLibrary } from "@/lib/library";
 import { exportSGF, importSGF } from "@/lib/sgf";
+import { isMuted, playCapture, playStone, setMuted } from "@/lib/sound";
 import { clearGame, loadGame, saveGame } from "@/lib/storage";
 
 // -----------------------------------------------------------------------------
@@ -99,10 +110,21 @@ export default function Board({
   } | null>(null);
   const [announcement, setAnnouncement] = useState("");
 
+  // 착수음
+  const [muted, setMutedFlag] = useState(
+    () => typeof window !== "undefined" && isMuted()
+  );
+
+  // 대국 시계 — 새 대국 시작 전(0수)에만 설정 가능
+  const [clockPreset, setClockPreset] = useState<ClockPreset>("none");
+  const [clock, setClock] = useState<GameClock | null>(null);
+  const clockLoser = clock?.loser ?? null;
+
   const router = useRouter();
   const svgRef = useRef<SVGSVGElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const pointerDownRef = useRef<{ x: number; y: number } | null>(null);
+  const lastTickRef = useRef(0);
 
   const boardSpan = (size - 1) * CELL + PAD * 2;
 
@@ -160,6 +182,37 @@ export default function Board({
     return () => clearTimeout(timer);
   }, [message]);
 
+  // 시계 진행 — 첫 수 이후, 종국·시간패 전까지 현재 차례의 시간을 소비
+  const clockRunning =
+    clock !== null &&
+    clockLoser === null &&
+    !current.isGameOver &&
+    current.moveHistory.length > 0;
+  useEffect(() => {
+    if (!clockRunning) return;
+    const activeColor = current.currentPlayer;
+    lastTickRef.current = performance.now();
+    const id = setInterval(() => {
+      const now = performance.now();
+      const delta = now - lastTickRef.current;
+      lastTickRef.current = now;
+      setClock((prev) =>
+        prev && prev.loser === null ? tickClock(prev, activeColor, delta) : prev
+      );
+    }, 200);
+    return () => clearInterval(id);
+  }, [clockRunning, current.currentPlayer]);
+
+  // 시간패 안내 — 인터벌 콜백에서 생긴 상태 변화를 스크린리더에 전달
+  useEffect(() => {
+    if (clockLoser !== null) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setAnnouncement(
+        `${colorName(clockLoser)} 시간패 — ${colorName(opponentOf(clockLoser))} 승`
+      );
+    }
+  }, [clockLoser]);
+
   // ---------------------------------------------------------------------------
   // 조작
   // ---------------------------------------------------------------------------
@@ -176,11 +229,26 @@ export default function Board({
 
   const tryPlace = useCallback(
     (index: number) => {
+      if (clockLoser !== null) {
+        notify("시간패로 끝난 대국입니다 — 새 게임을 시작하세요", "error");
+        return;
+      }
       const result = placeStone(current, index);
       if (!result.ok) {
         showError(result.reason);
         return;
       }
+      // 착수음 — 따냄이 있으면 잘그락
+      const capturedNow =
+        result.state.captures.black +
+        result.state.captures.white -
+        (current.captures.black + current.captures.white);
+      if (capturedNow > 0) playCapture(capturedNow);
+      else playStone();
+
+      setClock((prev) =>
+        prev ? onMoveComplete(prev, current.currentPlayer) : prev
+      );
       setStack((prev) => [...prev, result.state]);
       setPendingIndex(null);
       setViewIndex(null);
@@ -189,7 +257,7 @@ export default function Board({
           `${colorName(result.state.currentPlayer)} 차례.`
       );
     },
-    [current, showError, size]
+    [clockLoser, current, notify, showError, size]
   );
 
   /** 종국 후: 사석 토글. 대국 중: 착수(마우스는 즉시, 터치는 2탭 확정). */
@@ -200,6 +268,10 @@ export default function Board({
           "수순 탐색 중입니다 — 최신 수로 이동하거나 '여기서부터 다시 두기'를 누르세요",
           "info"
         );
+        return;
+      }
+      if (clockLoser !== null) {
+        notify("시간패로 끝난 대국입니다 — 새 게임을 시작하세요", "error");
         return;
       }
       if (current.isGameOver) {
@@ -228,20 +300,23 @@ export default function Board({
         );
       }
     },
-    [current, deadStones, isViewing, notify, pendingIndex, size, tryPlace]
+    [clockLoser, current, deadStones, isViewing, notify, pendingIndex, size, tryPlace]
   );
 
   const handleUndo = useCallback(() => {
-    if (stack.length <= 1 || isViewing) return;
+    if (stack.length <= 1 || isViewing || clockLoser !== null) return;
     setStack((prev) => prev.slice(0, -1)); // 패스·종국 포함 정확히 한 수 취소
     setDeadStones(new Set());
     setPendingIndex(null);
     setAnnouncement("한 수 무름");
-  }, [isViewing, stack.length]);
+  }, [clockLoser, isViewing, stack.length]);
 
   const handlePass = useCallback(() => {
-    if (current.isGameOver || isViewing) return;
+    if (current.isGameOver || isViewing || clockLoser !== null) return;
     const next = pass(current);
+    setClock((prev) =>
+      prev ? onMoveComplete(prev, current.currentPlayer) : prev
+    );
     setStack((prev) => [...prev, next]);
     setPendingIndex(null);
     setAnnouncement(
@@ -249,7 +324,7 @@ export default function Board({
         ? "두 번 연속 패스 — 종국. 죽은 돌을 클릭해 사석을 표시하세요."
         : `${colorName(current.currentPlayer)} 패스. ${colorName(next.currentPlayer)} 차례.`
     );
-  }, [current, isViewing]);
+  }, [clockLoser, current, isViewing]);
 
   const handleReset = useCallback(() => {
     // S1: 진행 중 대국은 확인 후에만 폐기 — 실수 탭으로 인한 데이터 손실 방지
@@ -266,9 +341,10 @@ export default function Board({
     setPendingIndex(null);
     setViewIndex(null);
     setMessage(null);
+    setClock(clockPreset === "none" ? null : createClock(clockPreset));
     clearGame(size);
     setAnnouncement("새 게임 시작. 흑 차례.");
-  }, [current.moveHistory.length, size]);
+  }, [clockPreset, current.moveHistory.length, size]);
 
   /** 탐색 중인 국면에서 이후 수순을 버리고 대국 재개 */
   const handleBranchHere = useCallback(() => {
@@ -363,6 +439,7 @@ export default function Board({
       setDeadStones(new Set());
       setPendingIndex(null);
       setViewIndex(null);
+      setClock(clockPreset === "none" ? null : createClock(clockPreset));
       if (replayed < parsed.moves.length) {
         notify(
           `기보에 규칙 위반 수가 있어 ${replayed}수까지만 불러왔습니다`,
@@ -372,7 +449,7 @@ export default function Board({
         notify(`기보 ${replayed}수를 불러왔습니다`, "info");
       }
     },
-    [SGF_IMPORT_ERROR, current.moveHistory.length, notify, router, size]
+    [SGF_IMPORT_ERROR, clockPreset, current.moveHistory.length, notify, router, size]
   );
 
   const handleSaveToLibrary = useCallback(async () => {
@@ -909,6 +986,62 @@ export default function Board({
           </div>
         </div>
 
+        {/* 대국 시계 */}
+        <div className="space-y-2 rounded-lg bg-gray-800 p-4">
+          <div className="flex items-center justify-between">
+            <span>대국 시계</span>
+            {current.moveHistory.length === 0 ? (
+              <select
+                value={clockPreset}
+                onChange={(e) => {
+                  const preset = e.target.value as ClockPreset;
+                  setClockPreset(preset);
+                  setClock(preset === "none" ? null : createClock(preset));
+                }}
+                aria-label="시계 설정"
+                className="rounded bg-gray-700 px-2 py-1 text-sm"
+              >
+                <option value="none">없음</option>
+                <option value="abs10">{CLOCK_PRESETS.abs10.label}</option>
+                <option value="byo5x30">{CLOCK_PRESETS.byo5x30.label}</option>
+              </select>
+            ) : (
+              <span className="text-sm text-gray-400">
+                {clockPreset === "none"
+                  ? "없음"
+                  : CLOCK_PRESETS[clockPreset].label}
+              </span>
+            )}
+          </div>
+          {clock &&
+            ([BLACK, WHITE] as const).map((color) => {
+              const side = color === BLACK ? clock.black : clock.white;
+              const isActive =
+                clockRunning && current.currentPlayer === color;
+              return (
+                <div
+                  key={color}
+                  className={`flex justify-between tabular-nums ${
+                    isActive ? "font-bold text-amber-400" : "text-gray-300"
+                  }`}
+                >
+                  <span>{colorName(color)}</span>
+                  <span>
+                    {side.inByoyomi
+                      ? `${formatMs(side.periodMs)} ×${side.periods}`
+                      : formatMs(side.mainMs)}
+                  </span>
+                </div>
+              );
+            })}
+          {clockLoser !== null && (
+            <div className="mt-1 rounded bg-red-900/60 px-2 py-1 text-center font-bold">
+              {colorName(clockLoser)} 시간패 —{" "}
+              {colorName(opponentOf(clockLoser))} 승
+            </div>
+          )}
+        </div>
+
         {score && (
           <div className="space-y-2 rounded-lg bg-amber-900 p-4">
             <h3 className="text-lg font-bold">계가</h3>
@@ -989,6 +1122,18 @@ export default function Board({
           >
             기보 보관함
           </Link>
+          <button
+            type="button"
+            onClick={() => {
+              const next = !muted;
+              setMuted(next);
+              setMutedFlag(next);
+            }}
+            aria-pressed={muted}
+            className="rounded-lg bg-gray-700 px-4 py-2 transition-colors hover:bg-gray-600"
+          >
+            {muted ? "🔇 착수음 끔" : "🔊 착수음 켬"}
+          </button>
           <input
             ref={fileInputRef}
             type="file"
